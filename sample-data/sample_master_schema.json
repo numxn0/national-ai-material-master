@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NationalAIMaterialMasterRecord",
+  "description": "Target canonical specification format for unified Indian PSU material master items",
+  "type": "object",
+  "required": [
+    "master_item_code",
+    "standardized_title",
+    "category",
+    "unit_of_measure",
+    "technical_attributes",
+    "governance"
+  ],
+  "properties": {
+    "master_item_code": {
+      "type": "string",
+      "pattern": "^NAMM-[A-Z]{3}-[A-Z]{3}-[0-9]{5}$",
+      "example": "NAMM-MEC-BRG-00192"
+    },
+    "standardized_title": {
+      "type": "string",
+      "example": "Deep Groove Ball Bearing 6205-2RS (Bore: 25mm, OD: 52mm, Width: 15mm)"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "Mechanical Spares",
+        "Bearings & Bushings",
+        "Fasteners & Fixings",
+        "Valves & Fluid Handling",
+        "Electrical Cables & Switchgear",
+        "Gaskets & Seals",
+        "Pumps & Compressors"
+      ]
+    },
+    "unit_of_measure": {
+      "type": "string",
+      "enum": ["NOS", "SET", "KGS", "MTR", "LTR", "PAIR"]
+    },
+    "technical_attributes": {
+      "type": "object",
+      "properties": {
+        "material_grade": { "type": "string", "example": "Chrome Steel / SS304" },
+        "dimensions": {
+          "type": "object",
+          "properties": {
+            "inner_diameter_mm": { "type": "number", "example": 25 },
+            "outer_diameter_mm": { "type": "number", "example": 52 },
+            "width_mm": { "type": "number", "example": 15 }
+          }
+        },
+        "standard_specification": { "type": "string", "example": "ISO 15 / IS 6455" },
+        "closure_type": { "type": "string", "example": "Double Rubber Seal (2RS)" }
+      }
+    },
+    "cross_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_organization": { "type": "string", "example": "Indian Railways" },
+          "source_item_code": { "type": "string", "example": "CR-BEAR-6205" },
+          "confidence_score": { "type": "number", "example": 0.962 }
+        }
+      }
+    },
+    "governance": {
+      "type": "object",
+      "properties": {
+        "approval_tier": { "type": "string", "enum": ["L1_VERIFIED", "L2_APPROVED"] },
+        "nodal_officer": { "type": "string", "example": "officer.sharma@railways.gov.in" },
+        "ministry_ratifier": { "type": "string", "example": "director.inventory@nic.in" },
+        "last_updated": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
