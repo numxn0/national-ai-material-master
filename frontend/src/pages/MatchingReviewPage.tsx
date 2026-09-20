@@ -11,7 +11,9 @@ import {
 import {
   fetchSampleHybridScoring,
   fetchSampleExplanations,
-  submitReviewDecisionDemo
+  submitReviewDecisionDemo,
+  fetchPersistedMatchingResults,
+  draftNationalCode
 } from '../services/api';
 import {
   HybridScoredCandidate,
@@ -26,6 +28,8 @@ export const MatchingReviewPage: React.FC = () => {
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [showTechnicalDetails, setShowTechnicalDetails] = useState<boolean>(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [batchId, setBatchId] = useState('');
+  const [persistedResults, setPersistedResults] = useState<any | null>(null);
 
   useEffect(() => {
     loadReviewData();
@@ -129,6 +133,70 @@ export const MatchingReviewPage: React.FC = () => {
           <span>{actionNotice}</span>
         </div>
       )}
+
+      <div className="bg-white border border-gray-200 rounded-lg p-5 shadow-sm space-y-4">
+        <div>
+          <h3 className="text-sm font-bold text-gray-900">Production Matching Results</h3>
+          <p className="text-xs text-gray-500 mt-1">
+            Enter a durable ingestion batch ID to review persisted match candidates, semantic metadata, and draft a National Material Code.
+          </p>
+        </div>
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            value={batchId}
+            onChange={(e) => setBatchId(e.target.value)}
+            placeholder="Ingestion batch UUID"
+            className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-xs"
+          />
+          <button
+            onClick={async () => {
+              if (!batchId.trim()) return;
+              setPersistedResults(await fetchPersistedMatchingResults(batchId.trim()));
+            }}
+            className="px-3.5 py-2 rounded-md bg-blue-600 text-white text-xs font-semibold"
+          >
+            Load Persisted Results
+          </button>
+        </div>
+        {persistedResults && (
+          <div className="overflow-x-auto border border-gray-200 rounded">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-100 text-gray-600">
+                <tr>
+                  <th className="text-left p-2">Candidate</th>
+                  <th className="text-left p-2">Score</th>
+                  <th className="text-left p-2">Classification</th>
+                  <th className="text-left p-2">Semantic Metadata</th>
+                  <th className="text-left p-2">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(persistedResults.items || []).map((item: any) => (
+                  <tr key={item.id} className="border-t border-gray-200">
+                    <td className="p-2 font-mono text-blue-700">{item.pair_id.slice(0, 42)}...</td>
+                    <td className="p-2">{((item.hybrid_score || item.candidate_score) * 100).toFixed(1)}%</td>
+                    <td className="p-2">{item.classification}</td>
+                    <td className="p-2">
+                      {item.score_details?.persistent_semantic_embedding ? 'stored vector comparison' : 'rule baseline'}
+                    </td>
+                    <td className="p-2">
+                      <button
+                        onClick={async () => {
+                          const draft = await draftNationalCode(item.id);
+                          setActionNotice(`Drafted ${draft.national_material.national_material_code}`);
+                        }}
+                        className="px-2.5 py-1 rounded bg-green-600 text-white text-[11px] font-semibold"
+                      >
+                        Draft Code
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {loading ? (
         <div className="p-12 text-center bg-white border border-gray-200 rounded-lg shadow-sm text-xs text-gray-500">

@@ -1,8 +1,15 @@
-from fastapi import APIRouter, Body, HTTPException, Query
+from uuid import UUID
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
+from app.core.auth import get_current_user, require_roles
+from app.db.models import MaterialMapping, NationalMaterial, SourceMaterial
+from app.db.session import get_db
 from app.schemas.approval_workflow import (
     ApprovalCase,
     ApprovalStage,
@@ -11,12 +18,30 @@ from app.schemas.approval_workflow import (
     ApprovalActionResponse,
     ApprovalQueueResponse,
 )
+from app.schemas import (
+    PersistentApprovalCaseCreateResponse,
+    PersistentApprovalCaseListResponse,
+    PersistentApprovalCaseResponse,
+    PersistentApprovalDecisionRequest,
+    PersistentApprovalDecisionResponse,
+    PersistentApprovalResubmitRequest,
+)
 from app.services.approval_workflow import (
     build_demo_approval_queue,
     simulate_l1_review,
     simulate_l2_review,
 )
 from app.services.audit_trail import create_audit_event, GENESIS_HASH
+from app.services.persistent_approvals import (
+    ApprovalWorkflowError,
+    apply_decision,
+    case_payload,
+    create_case_from_national_material,
+    get_case,
+    list_cases,
+    resubmit_case,
+)
+from app.services.auth import AuthenticatedUser
 
 router = APIRouter(prefix="/approvals", tags=["Dual-Tier Governance & Approvals"])
 
@@ -145,6 +170,178 @@ async def execute_demo_approval_action(payload: ApprovalActionRequest = Body(...
         message="Demo-only approval action processed in memory; not persisted to database.",
         persisted=False,
     )
+
+
+# --- Persistent Approval Workflow Endpoints ---
+
+def _case_response(case) -> PersistentApprovalCaseResponse:
+    return PersistentApprovalCaseResponse(**case_payload(case))
+
+
+def _reject_spoofed_identity(payload: PersistentApprovalDecisionRequest, current_user: AuthenticatedUser) -> None:
+    if payload.reviewer_name and payload.reviewer_name not in {current_user.display_name, current_user.username}:
+        raise HTTPException(status_code=400, detail="reviewer_name must match the authenticated user.")
+    if payload.reviewer_role and payload.reviewer_role.upper() not in current_user.roles and not current_user.has_role("ADMIN"):
+        raise HTTPException(status_code=400, detail="reviewer_role must match an authenticated role.")
+
+
+def _require_stage_role(case, current_user: AuthenticatedUser) -> str:
+    if case.current_stage == "PENDING_L1":
+        if not (current_user.has_role("ADMIN") or current_user.has_role("L1_REVIEWER")):
+            raise HTTPException(status_code=403, detail="PENDING_L1 decisions require ADMIN or L1_REVIEWER.")
+        return "L1_REVIEWER"
+    if case.current_stage == "PENDING_L2":
+        if not (current_user.has_role("ADMIN") or current_user.has_role("L2_AUTHORITY")):
+            raise HTTPException(status_code=403, detail="PENDING_L2 decisions require ADMIN or L2_AUTHORITY.")
+        return "L2_AUTHORITY"
+    raise HTTPException(status_code=409, detail=f"Approval case is not pending reviewer action: {case.current_stage}.")
+
+
+def _national_source_cpses(db: Session, national_material_code: str) -> set[str]:
+    rows = db.execute(
+        select(SourceMaterial.source_cpse)
+        .join(MaterialMapping, MaterialMapping.source_material_id == SourceMaterial.id)
+        .join(NationalMaterial, NationalMaterial.id == MaterialMapping.national_material_id)
+        .where(NationalMaterial.national_material_code == national_material_code)
+    ).scalars().all()
+    return {row for row in rows if row}
+
+
+@router.post(
+    "/cases/from-national-material/{national_material_code}",
+    response_model=PersistentApprovalCaseCreateResponse,
+    tags=["Persistent Approval Workflow"],
+)
+async def create_persistent_approval_case(
+    national_material_code: str,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "CPSE_USER")),
+):
+    try:
+        if current_user.has_role("CPSE_USER") and not current_user.has_role("ADMIN") and current_user.organization_scope:
+            cpses = _national_source_cpses(db, national_material_code)
+            if cpses and any(cpse.upper() != current_user.organization_scope.upper() for cpse in cpses):
+                raise HTTPException(status_code=403, detail="CPSE_USER is scoped to a different organization.")
+        db.rollback()
+        case, idempotent_replay = create_case_from_national_material(
+            db,
+            national_material_code,
+            actor_name=current_user.display_name,
+            actor_role="ADMIN" if current_user.has_role("ADMIN") else "CPSE_USER",
+            actor_username=current_user.username,
+            actor_identity_verified=True,
+        )
+        return PersistentApprovalCaseCreateResponse(
+            idempotent_replay=idempotent_replay,
+            actor_identity_verified=True,
+            case=_case_response(case),
+        )
+    except HTTPException:
+        raise
+    except ApprovalWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.get("/cases", response_model=PersistentApprovalCaseListResponse, tags=["Persistent Approval Workflow"])
+async def list_persistent_approval_cases(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    current_stage: Optional[str] = Query(None),
+    approval_status: Optional[str] = Query(None),
+    national_material_code: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "L1_REVIEWER", "L2_AUTHORITY", "AUDITOR")),
+):
+    total, cases = list_cases(
+        db,
+        page=page,
+        limit=limit,
+        current_stage=current_stage,
+        approval_status=approval_status,
+        national_material_code=national_material_code,
+    )
+    return PersistentApprovalCaseListResponse(
+        count=len(cases),
+        total=total,
+        page=page,
+        limit=limit,
+        actor_identity_verified=True,
+        items=[_case_response(case) for case in cases],
+    )
+
+
+@router.get("/cases/{approval_case_id}", response_model=PersistentApprovalCaseResponse, tags=["Persistent Approval Workflow"])
+async def get_persistent_approval_case(
+    approval_case_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "L1_REVIEWER", "L2_AUTHORITY", "AUDITOR")),
+):
+    case = get_case(db, approval_case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail=f"Approval case '{approval_case_id}' not found.")
+    return _case_response(case)
+
+
+@router.post(
+    "/cases/{approval_case_id}/decision",
+    response_model=PersistentApprovalDecisionResponse,
+    tags=["Persistent Approval Workflow"],
+)
+async def decide_persistent_approval_case(
+    approval_case_id: UUID,
+    payload: PersistentApprovalDecisionRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    try:
+        existing = get_case(db, approval_case_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Approval case '{approval_case_id}' not found.")
+        effective_role = _require_stage_role(existing, current_user)
+        _reject_spoofed_identity(payload, current_user)
+        db.rollback()
+        case = apply_decision(
+            db,
+            approval_case_id,
+            decision=payload.decision.value,
+            reviewer_name=current_user.display_name,
+            reviewer_role=effective_role,
+            reviewer_note=payload.reviewer_note,
+            actor_username=current_user.username,
+            actor_identity_verified=True,
+        )
+        return PersistentApprovalDecisionResponse(actor_identity_verified=True, case=_case_response(case))
+    except HTTPException:
+        raise
+    except ApprovalWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@router.post(
+    "/cases/{approval_case_id}/resubmit",
+    response_model=PersistentApprovalDecisionResponse,
+    tags=["Persistent Approval Workflow"],
+)
+async def resubmit_persistent_approval_case(
+    approval_case_id: UUID,
+    payload: PersistentApprovalResubmitRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "CPSE_USER", "L1_REVIEWER")),
+):
+    try:
+        db.rollback()
+        case = resubmit_case(
+            db,
+            approval_case_id,
+            submitter_note=payload.submitter_note,
+            actor_name=current_user.display_name,
+            actor_role="ADMIN" if current_user.has_role("ADMIN") else sorted(current_user.roles)[0],
+            actor_username=current_user.username,
+            actor_identity_verified=True,
+        )
+        return PersistentApprovalDecisionResponse(actor_identity_verified=True, case=_case_response(case))
+    except ApprovalWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 # --- Legacy Placeholder Endpoints ---

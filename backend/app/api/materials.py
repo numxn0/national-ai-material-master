@@ -1,13 +1,23 @@
-from fastapi import APIRouter, Query, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Depends, Query, UploadFile, File, Form, HTTPException
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from datetime import datetime
 from pathlib import Path
+from uuid import UUID
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from app.core.auth import require_roles
 from app.schemas import (
     SourceMaterialResponse,
     NationalMaterialResponse,
     IngestionBatchResponse,
+    CSVIngestResponse,
+    IngestionBatchDetailResponse,
+    IngestionRowErrorResponse,
+    PersistedMaterialsPageResponse,
+    PersistedSourceMaterialResponse,
     CSVPreviewResponse,
     TextNormalizationRequest,
     TextNormalizationResponse,
@@ -17,6 +27,10 @@ from app.schemas import (
     EXAMPLE_NATIONAL_MATERIAL,
     EXAMPLE_INGESTION_BATCH,
 )
+from app.db.models import IngestionBatch, IngestionRowError, SourceMaterial
+from app.db.session import get_db
+from app.services.auth import AuthenticatedUser, assert_cpse_scope
+from app.services.durable_ingestion import ingest_csv_content
 from app.services.ingestion_preview import parse_csv_content
 from app.services.normalization import (
     normalize_punctuation,
@@ -159,6 +173,49 @@ async def preview_uploaded_csv(
             detail=f"Error processing CSV preview: {str(exc)}"
         )
 
+@router.post("/ingest-csv", response_model=CSVIngestResponse, tags=["Durable Material Ingestion"])
+async def ingest_uploaded_csv(
+    file: UploadFile = File(..., description="Uploaded CSV catalog file"),
+    source_cpse: Optional[str] = Form(None, description="Optional CPSE enterprise name"),
+    source_system: Optional[str] = Form(None, description="Optional originating ERP system name"),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "CPSE_USER")),
+):
+    """
+    Persist a CSV catalog as an idempotent ingestion batch.
+    POST /preview-csv remains the non-persistent preview path.
+    """
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid file format. Please upload a standard comma-separated (.csv) file."
+        )
+
+    try:
+        assert_cpse_scope(current_user, source_cpse)
+        content_bytes = await file.read()
+        batch, idempotent_replay, error_count = ingest_csv_content(
+            db,
+            content_bytes=content_bytes,
+            file_name=filename,
+            source_cpse=source_cpse,
+            source_system=source_system,
+        )
+        return CSVIngestResponse(
+            message="CSV ingestion batch replayed from existing durable records." if idempotent_replay else "CSV ingestion batch persisted successfully.",
+            idempotent_replay=idempotent_replay,
+            batch=IngestionBatchResponse.model_validate(batch),
+            processed_records=batch.processed_records,
+            failed_records=batch.failed_records,
+            error_count=error_count,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"CSV ingestion failed: {str(exc)}")
+
 @router.post("/normalize-text", response_model=TextNormalizationResponse, tags=["Data Cleaning & Normalization"])
 async def normalize_material_text(payload: TextNormalizationRequest):
     """
@@ -217,16 +274,78 @@ async def extract_material_attributes(payload: AttributeExtractionRequest):
         extraction_notes=notes,
     )
 
+@router.get("/batches/{batch_id}", response_model=IngestionBatchDetailResponse, tags=["Durable Material Ingestion"])
+async def get_ingestion_batch(
+    batch_id: UUID,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve durable ingestion batch metadata and paginated row errors.
+    """
+    batch = db.get(IngestionBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail=f"Ingestion batch '{batch_id}' not found.")
+
+    offset = (page - 1) * limit
+    errors = db.execute(
+        select(IngestionRowError)
+        .where(IngestionRowError.ingestion_batch_id == batch_id)
+        .order_by(IngestionRowError.row_number.asc(), IngestionRowError.created_at.asc())
+        .offset(offset)
+        .limit(limit)
+    ).scalars().all()
+    error_count = db.scalar(
+        select(func.count()).select_from(IngestionRowError).where(IngestionRowError.ingestion_batch_id == batch_id)
+    ) or 0
+
+    return IngestionBatchDetailResponse(
+        batch=IngestionBatchResponse.model_validate(batch),
+        error_count=error_count,
+        errors=[IngestionRowErrorResponse.model_validate(err) for err in errors],
+        page=page,
+        limit=limit,
+    )
+
 @router.get("", response_model=Dict[str, Any])
 async def list_materials(
     page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100),
     category: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    batch_id: Optional[UUID] = Query(None, description="Optional durable ingestion batch ID"),
+    db: Session = Depends(get_db),
 ):
     """
     Placeholder endpoint: List all ingested materials with pagination and filtering.
     """
+    if batch_id is not None:
+        batch = db.get(IngestionBatch, batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail=f"Ingestion batch '{batch_id}' not found.")
+
+        offset = (page - 1) * limit
+        stmt = (
+            select(SourceMaterial)
+            .where(SourceMaterial.ingestion_batch_id == batch_id)
+            .order_by(SourceMaterial.created_at.asc(), SourceMaterial.source_material_code.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        items = db.execute(stmt).scalars().all()
+        total = db.scalar(
+            select(func.count()).select_from(SourceMaterial).where(SourceMaterial.ingestion_batch_id == batch_id)
+        ) or 0
+        return PersistedMaterialsPageResponse(
+            batch_id=batch_id,
+            count=len(items),
+            total=total,
+            page=page,
+            limit=limit,
+            items=[PersistedSourceMaterialResponse.model_validate(item) for item in items],
+        ).model_dump(mode="json")
+
     filtered = PLACEHOLDER_MATERIALS
     if category:
         filtered = [m for m in filtered if m["category"].lower() == category.lower()]

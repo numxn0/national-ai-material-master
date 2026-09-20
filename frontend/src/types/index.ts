@@ -580,3 +580,75 @@ export interface DemoSummaryResponse {
   planned_production_integrations: string[];
   notes: string;
 }
+
+export interface AnalyticsCpseBreakdown {
+  cpse_name: string;
+  material_count: number;
+  batch_count: number;
+  candidate_involvement_count: number;
+  approved_mapping_count: number;
+}
+
+export interface AnalyticsCategoryBreakdown {
+  category: string;
+  material_count: number;
+  candidate_involvement_count: number;
+  active_national_material_count: number;
+}
+
+export interface AnalyticsRecentActivity {
+  timestamp: string;
+  action: string;
+  actor: string;
+  entity_type: string;
+  entity_id: string;
+  summary: string;
+}
+
+export interface AnalyticsIngestionTimelinePoint {
+  date: string;
+  batches_created: number;
+  source_materials_processed: number;
+  rejected_rows: number;
+}
+
+export interface AnalyticsAuditChainSummary {
+  chain_key: string;
+  last_sequence_number: number;
+  last_hash: string;
+  last_event_id?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AnalyticsSummaryResponse {
+  total_source_materials: number;
+  total_ingestion_batches: number;
+  batches_completed: number;
+  batches_with_errors: number;
+  total_match_candidates: number;
+  duplicate_candidate_count: number;
+  candidate_counts_by_classification: Record<string, number>;
+  candidate_counts_by_status: Record<string, number>;
+  pending_l1_count: number;
+  pending_l2_count: number;
+  needs_more_info_count: number;
+  approved_mapping_count: number;
+  rejected_mapping_count: number;
+  national_material_draft_count: number;
+  national_material_active_count: number;
+  national_material_rejected_count: number;
+  estimated_approved_savings_inr: number;
+  actual_procurement_spend_inr: number;
+  actual_procurement_quantity: number;
+  procurement_vendor_count: number;
+  approved_national_code_spend_inr: number;
+  procurement_metric_source: string;
+  audit_event_count: number;
+  audit_chain: AnalyticsAuditChainSummary;
+  cpse_breakdown: AnalyticsCpseBreakdown[];
+  category_breakdown: AnalyticsCategoryBreakdown[];
+  recent_activity: AnalyticsRecentActivity[];
+  ingestion_timeline: AnalyticsIngestionTimelinePoint[];
+  days: number;
+  generated_at: string;
+}

@@ -1,0 +1,42 @@
+{
+  "d": {
+    "results": [
+      {
+        "Material": "SAP-BRG-6205-A",
+        "MaterialDescription": "DEEP GROOVE BALL BEARING 6205 2RS C3 SKF",
+        "BaseUnit": "NOS",
+        "MaterialGroup": "BEARINGS",
+        "Plant": "BHEL-TRICHY",
+        "CompanyCode": "BHEL",
+        "SourceSystem": "SAP_ECC_BHEL_MOCK",
+        "ManufacturerName": "SKF",
+        "ManufacturerPartNumber": "6205-2RS-C3",
+        "Specification": "Single row deep groove bearing, rubber sealed, C3 clearance"
+      },
+      {
+        "Material": "SAP-BRG-6205-B",
+        "MaterialDescription": "BALL BEARING 6205-2RS DEEP GROOVE SKF",
+        "BaseUnit": "EA",
+        "MaterialGroup": "BEARINGS",
+        "Plant": "IOCL-PANIPAT",
+        "CompanyCode": "IOCL",
+        "SourceSystem": "SAP_S4_IOCL_MOCK",
+        "ManufacturerName": "SKF",
+        "ManufacturerPartNumber": "6205 2RS",
+        "Specification": "Deep groove ball bearing 6205, double rubber seal"
+      },
+      {
+        "Material": "SAP-VLV-100-CL300",
+        "MaterialDescription": "BALL VALVE 100MM CLASS 300 FLANGED WCB",
+        "BaseUnit": "NOS",
+        "MaterialGroup": "VALVES",
+        "Plant": "ONGC-HAZIRA",
+        "CompanyCode": "ONGC",
+        "SourceSystem": "SAP_ECC_ONGC_MOCK",
+        "ManufacturerName": "L&T VALVES",
+        "ManufacturerPartNumber": "BV-100-CL300-WCB",
+        "Specification": "100 mm flanged class 300 WCB ball valve"
+      }
+    ]
+  }
+}

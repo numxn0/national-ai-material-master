@@ -1,53 +1,86 @@
 """
-Verification script for Prompt 9: Hybrid Match Scoring Engine With XGBoost-Ready Placeholder
-Pure asyncio ASGI test harness.
+Prompt 9 verification: production analytics APIs and live dashboard data contract.
+
+Uses a temporary SQLite database only. No developer or production database is touched.
 """
 
-import sys
-import os
-import json
 import asyncio
+import json
+import os
+import sys
+import tempfile
+import uuid
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 backend_dir = Path(__file__).resolve().parent
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
-from main import app
-from app.schemas.hybrid_scoring import (
-    HybridClassification,
-    MatchFeatureVector,
-    HybridScoreBreakdown,
-)
-from app.schemas.matching import ConflictSignal
-from app.services.hybrid_scoring import (
-    apply_conflict_penalties,
-    calculate_rule_based_hybrid_score,
-    classify_hybrid_score,
-)
-from app.services.ml_feature_pipeline import describe_xgboost_training_plan
+DEFAULT_HEADERS: list[tuple[bytes, bytes]] = []
 
-async def make_request(method, path, body=b"", headers=None):
-    if headers is None:
-        headers = []
-    
-    query_string = b""
+
+def install_verify_admin(SessionLocal):
+    from app.services.auth import create_or_update_local_user
+
+    with SessionLocal() as db:
+        create_or_update_local_user(
+            db,
+            username="verify_admin",
+            password="verify-pass",
+            display_name="Verify Admin",
+            roles=["ADMIN", "AUDITOR"],
+        )
+    global DEFAULT_HEADERS
+    DEFAULT_HEADERS = [(b"authorization", b"Basic dmVyaWZ5X2FkbWluOnZlcmlmeS1wYXNz")]
+
+
+def multipart_body(fields: dict, file_field: str, filename: str, content: bytes):
+    boundary = f"----namm-{uuid.uuid4().hex}"
+    chunks = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        chunks.append(str(value).encode())
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}\r\n".encode())
+    chunks.append(
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+        "Content-Type: text/csv\r\n\r\n".encode()
+    )
+    chunks.append(content)
+    chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(chunks)
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+async def make_request(app, method: str, path: str, body: bytes = b"", headers: list[tuple[bytes, bytes]] | None = None):
     if "?" in path:
-        path_part, query_part = path.split("?", 1)
-        path = path_part
-        query_string = query_part.encode("utf-8")
+        route_path, query_string = path.split("?", 1)
+    else:
+        route_path, query_string = path, ""
+    all_headers = [(b"host", b"testserver"), *DEFAULT_HEADERS]
+    if body:
+        all_headers.append((b"content-length", str(len(body)).encode()))
+    if headers:
+        all_headers.extend(headers)
 
     scope = {
         "type": "http",
         "http_version": "1.1",
         "method": method,
-        "path": path,
-        "raw_path": path.encode(),
-        "query_string": query_string,
-        "headers": [[b"host", b"testserver"]] + headers,
+        "path": route_path,
+        "raw_path": route_path.encode("utf-8"),
+        "query_string": query_string.encode("utf-8"),
+        "headers": all_headers,
     }
-    status_code = None
     response_body = []
+    status_code = 0
     sent = False
 
     async def receive():
@@ -65,185 +98,188 @@ async def make_request(method, path, body=b"", headers=None):
             response_body.append(message.get("body", b""))
 
     await app(scope, receive, send)
-    res_str = b"".join(response_body).decode("utf-8")
-    return status_code, res_str
+    raw = b"".join(response_body).decode("utf-8")
+    return status_code, json.loads(raw) if raw else None
 
 
-async def run_tests():
-    print("======================================================================")
-    print("PROMPT 9: HYBRID MATCH SCORING & ML FEATURE PIPELINE VERIFICATION")
-    print("======================================================================")
+def json_body(payload: dict):
+    return json.dumps(payload).encode("utf-8"), "application/json"
 
-    # 1. Test Conflict Penalties & Caps
-    print("\n--- 1. Testing Conflict Penalty Caps ---")
-    mock_features = MatchFeatureVector(
-        description_similarity=0.95,
-        token_similarity=0.90,
-        semantic_similarity_score=0.92,
-        attribute_similarity=0.95,
-        exact_attribute_match_count=4,
-        conflicting_attribute_count=1,
-        critical_attribute_conflict_count=1,
-        missing_critical_attribute_count=0,
-        category_compatibility=1.0,
-        uom_compatibility=1.0,
-        manufacturer_match=1.0,
-        part_number_match=1.0,
-        model_number_match=1.0,
-        source_cpse_match=0.0,
-        confidence_gap=0.0,
-        requires_human_review=True,
+
+def post_json(app, path: str, payload: dict):
+    body, content_type = json_body(payload)
+    return asyncio.run(make_request(app, "POST", path, body, [(b"content-type", content_type.encode())]))
+
+
+def upload_csv(app, *, cpse: str, filename: str, csv_text: str):
+    body, content_type = multipart_body(
+        {"source_cpse": cpse, "source_system": "PROMPT9_VERIFY_ERP"},
+        "file",
+        filename,
+        csv_text.encode("utf-8"),
     )
+    return asyncio.run(make_request(app, "POST", "/api/materials/ingest-csv", body, [(b"content-type", content_type.encode())]))
 
-    # 1.1 Single critical conflict (general) -> cap at 0.60
-    conflicts_single = [ConflictSignal(
-        attribute="schedule",
-        value_a="SCH 40",
-        value_b="SCH 80",
-        severity="CRITICAL",
-        description="Schedule mismatch"
-    )]
-    score, breakdown = calculate_rule_based_hybrid_score(mock_features, conflicts_single)
-    assert score <= 0.60, f"Expected score <= 0.60, got {score}"
-    assert breakdown.conflict_penalty_applied is True
-    print(f"[PASS] Single critical conflict capped at: {score:.4f} (<= 0.60)")
 
-    # 1.2 Bearing number conflict -> cap at 0.40
-    conflicts_bearing = [ConflictSignal(
-        attribute="bearing_number",
-        value_a="6205",
-        value_b="6305",
-        severity="CRITICAL",
-        description="Bearing series mismatch"
-    )]
-    score, breakdown = calculate_rule_based_hybrid_score(mock_features, conflicts_bearing)
-    assert score <= 0.40, f"Expected score <= 0.40 for bearing conflict, got {score}"
-    assert breakdown.score_cap_applied == 0.40
-    print(f"[PASS] Bearing number conflict capped at: {score:.4f} (<= 0.40)")
+def by_cpse(summary: dict, cpse: str) -> dict:
+    return next((item for item in summary["cpse_breakdown"] if item["cpse_name"] == cpse), {})
 
-    # 1.3 Multiple critical conflicts -> cap at 0.45
-    mock_multi = mock_features.model_copy(update={"critical_attribute_conflict_count": 2})
-    conflicts_multi = [
-        ConflictSignal(attribute="voltage", value_a="1.1KV", value_b="3.3KV", severity="CRITICAL", description="Voltage mismatch"),
-        ConflictSignal(attribute="number_of_cores", value_a="3", value_b="4", severity="CRITICAL", description="Core count mismatch"),
-    ]
-    score, breakdown = calculate_rule_based_hybrid_score(mock_multi, conflicts_multi)
-    assert score <= 0.45, f"Expected score <= 0.45 for multiple critical conflicts, got {score}"
-    print(f"[PASS] Multiple critical conflicts capped at: {score:.4f} (<= 0.45)")
 
-    # 1.4 Incompatible category -> cap at 0.30
-    mock_cat_incomp = mock_features.model_copy(update={"category_compatibility": 0.0})
-    score, breakdown = calculate_rule_based_hybrid_score(mock_cat_incomp, [])
-    assert score <= 0.30, f"Expected score <= 0.30 for category incompatible, got {score}"
-    print(f"[PASS] Category incompatible capped at: {score:.4f} (<= 0.30)")
+def by_category(summary: dict, category: str) -> dict:
+    return next((item for item in summary["category_breakdown"] if item["category"] == category), {})
 
-    # 2. Test Classification Thresholds
-    print("\n--- 2. Testing Hybrid Classification Decision Tiers ---")
-    assert classify_hybrid_score(0.95) == HybridClassification.AUTO_MATCH_RECOMMENDED
-    assert classify_hybrid_score(0.85) == HybridClassification.STRONG_REVIEW_CANDIDATE
-    assert classify_hybrid_score(0.72) == HybridClassification.MANUAL_REVIEW_REQUIRED
-    assert classify_hybrid_score(0.55) == HybridClassification.WEAK_MATCH_REVIEW_OPTIONAL
-    assert classify_hybrid_score(0.42) == HybridClassification.REJECTED_BY_SCORING
-    print("[PASS] Classification thresholds verified across all 5 decision bands.")
 
-    # 3. Test FastAPI ASGI Endpoints
-    print("\n--- 3. Testing Hybrid Scoring & ML Endpoints ---")
-    
-    # 3.1 Health Check
-    s, b = await make_request("GET", "/health")
-    assert s == 200, f"/health failed: {s}"
-    print("[PASS] /health returns 200.")
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="namm_prompt9_") as tmp:
+        db_path = Path(tmp) / "verify_prompt9.db"
+        os.environ["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+        os.environ["EMBEDDING_PROVIDER"] = "stub"
+        os.environ["EMBEDDING_DIMENSIONS"] = "64"
+        os.environ["EMBEDDING_ALLOW_STUB_FALLBACK"] = "true"
 
-    # 3.2 GET /api/matching/hybrid-score/sample
-    s, b = await make_request("GET", "/api/matching/hybrid-score/sample")
-    assert s == 200, f"/api/matching/hybrid-score/sample failed with {s}: {b}"
-    hybrid_sample = json.loads(b)
-    assert hybrid_sample["total_candidates_scored"] > 0
-    assert len(hybrid_sample["candidates"]) > 0
-    top_c = hybrid_sample["candidates"][0]
-    assert "hybrid_score" in top_c
-    assert "hybrid_classification" in top_c
-    assert "hybrid_score_breakdown" in top_c
-    assert "feature_vector" in top_c
-    assert "hybrid_recommendation" in top_c
-    print(f"[PASS] GET /api/matching/hybrid-score/sample returned {hybrid_sample['total_candidates_scored']} candidates.")
-    print(f"       Top candidate: {top_c['pair_id']} - Hybrid Score: {top_c['hybrid_score']:.4f} [{top_c['hybrid_classification']}]")
-    print(f"       Breakdown: Desc={top_c['hybrid_score_breakdown']['description_contribution']:.3f}, Attr={top_c['hybrid_score_breakdown']['attribute_contribution']:.3f}, Sem={top_c['hybrid_score_breakdown']['semantic_contribution']:.3f}")
-    
-    # Verify ranked order descending
-    scores = [c["hybrid_score"] for c in hybrid_sample["candidates"]]
-    assert scores == sorted(scores, reverse=True), "Candidates must be sorted descending by hybrid_score!"
-    print("[PASS] Candidates strictly sorted descending by hybrid score.")
+        from alembic import command
+        from alembic.config import Config
 
-    # 3.3 POST /api/matching/hybrid-score
-    post_payload = json.dumps({
-        "candidates": [
-            {
-                "pair_id": top_c["pair_id"],
-                "source_material_a": top_c["source_material_a"],
-                "source_material_b": top_c["source_material_b"],
-                "score": top_c["rapidfuzz_score"],
-                "classification": "POSSIBLE_DUPLICATE",
-                "score_breakdown": {
-                    "description_similarity": top_c["feature_vector"]["description_similarity"],
-                    "attribute_similarity": top_c["feature_vector"]["attribute_similarity"],
-                    "token_overlap": top_c["feature_vector"]["token_similarity"],
-                    "category_compatibility": top_c["feature_vector"]["category_compatibility"],
-                    "uom_compatibility": top_c["feature_vector"]["uom_compatibility"],
-                    "mfg_part_compatibility": top_c["feature_vector"]["manufacturer_match"],
-                    "final_score": top_c["rapidfuzz_score"],
-                },
-                "matching_signals": top_c["matching_signals"],
-                "conflict_signals": top_c["conflict_signals"],
-                "recommendation": "Candidate match",
-                "semantic_similarity_score": top_c["feature_vector"]["semantic_similarity_score"],
-                "semantic_method": "DETERMINISTIC_TOKEN_HASH_STUB (Preview)"
-            }
-        ]
-    }).encode("utf-8")
-    headers_json = [
-        [b"content-type", b"application/json"],
-        [b"content-length", str(len(post_payload)).encode()],
-    ]
-    s, b = await make_request("POST", "/api/matching/hybrid-score", body=post_payload, headers=headers_json)
-    assert s == 200, f"POST /api/matching/hybrid-score failed with {s}: {b}"
-    post_data = json.loads(b)
-    assert post_data["total_candidates_scored"] == 1
-    assert post_data["candidates"][0]["hybrid_score"] > 0.0
-    print("[PASS] POST /api/matching/hybrid-score executed successfully.")
+        alembic_cfg = Config(str(backend_dir / "alembic.ini"))
+        alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+        command.upgrade(alembic_cfg, "head")
 
-    # 3.4 GET /api/matching/ml-training-plan
-    s, b = await make_request("GET", "/api/matching/ml-training-plan")
-    assert s == 200, f"GET /api/matching/ml-training-plan failed with {s}: {b}"
-    plan_data = json.loads(b)
-    assert plan_data["feature_count"] == len(plan_data["feature_names"])
-    assert plan_data["feature_count"] >= 14
-    assert "XGBoost" in plan_data["model_target"]
-    assert "FEATURE_EXTRACTION_READY" in plan_data["current_status"]
-    print(f"[PASS] GET /api/matching/ml-training-plan passed ({plan_data['feature_count']} features documented).")
+        from app.core.config import settings
+        from app.db.session import SessionLocal, engine
+        from main import app
+        install_verify_admin(SessionLocal)
 
-    # 3.5 GET /api/matching/ml-feature-export/sample
-    s, b = await make_request("GET", "/api/matching/ml-feature-export/sample")
-    assert s == 200, f"GET /api/matching/ml-feature-export/sample failed with {s}: {b}"
-    export_data = json.loads(b)
-    assert export_data["total_rows"] > 0
-    sample_row = export_data["rows"][0]
-    assert sample_row["label"] is None, "Training export label must be None (null) before officer review!"
-    assert sample_row["review_status"] == "UNLABELED"
-    assert "description_similarity" in sample_row
-    assert "critical_attribute_conflict_count" in sample_row
-    print(f"[PASS] GET /api/matching/ml-feature-export/sample passed ({export_data['total_rows']} training rows with null labels).")
+        settings.EMBEDDING_PROVIDER = "stub"
+        settings.EMBEDDING_DIMENSIONS = 64
+        settings.EMBEDDING_ALLOW_STUB_FALLBACK = True
 
-    # 3.6 Regression check on previous endpoints
-    s, _ = await make_request("GET", "/api/matching/candidates/sample")
-    assert s == 200, f"Candidates sample regression failed: {s}"
-    s, _ = await make_request("GET", "/api/matching/embedding/sample")
-    assert s == 200, f"Embedding sample regression failed: {s}"
-    print("[PASS] Previous endpoints regression check succeeded.")
+        st, empty = asyncio.run(make_request(app, "GET", "/api/analytics/summary"))
+        assert st == 200, f"empty analytics failed: {st}, {empty}"
+        assert empty["total_source_materials"] == 0
+        assert empty["total_ingestion_batches"] == 0
+        assert empty["total_match_candidates"] == 0
+        assert empty["duplicate_candidate_count"] == 0
+        assert empty["approved_mapping_count"] == 0
+        assert empty["audit_event_count"] == 0
+        assert empty["audit_chain"]["last_sequence_number"] == 0
+        assert empty["cpse_breakdown"] == []
+        assert empty["category_breakdown"] == []
+        assert empty["recent_activity"] == []
+        assert empty["ingestion_timeline"] == []
 
-    print("\n======================================================================")
-    print("ALL PROMPT 9 BACKEND CHECKS COMPLETED SUCCESSFULLY!")
-    print("======================================================================")
+        for invalid_path in ["/api/analytics/summary?days=0", "/api/analytics/summary?days=366"]:
+            st, invalid = asyncio.run(make_request(app, "GET", invalid_path))
+            assert st == 422, f"days validation should reject {invalid_path}: {st}, {invalid}"
+
+        csv_a = """item_code,description,uom,category,manufacturer
+ANL-BRG-6205-A,DEEP GROOVE BALL BEARING 6205 2RS C3 SKF,NOS,BEARINGS,SKF
+"""
+        st, ingest_a = upload_csv(app, cpse="ANALYTICS_CPSE_A", filename="analytics_a.csv", csv_text=csv_a)
+        assert st == 200, f"first ingest failed: {st}, {ingest_a}"
+        batch_a = ingest_a["batch"]["id"]
+
+        csv_b = """item_code,description,uom,category,manufacturer
+ANL-BRG-6205-B,BALL BEARING 6205-2RS DEEP GROOVE SKF,NOS,BEARINGS,SKF
+"""
+        st, ingest_b = upload_csv(app, cpse="ANALYTICS_CPSE_B", filename="analytics_b.csv", csv_text=csv_b)
+        assert st == 200, f"second ingest failed: {st}, {ingest_b}"
+        batch_b = ingest_b["batch"]["id"]
+
+        st, run = post_json(app, f"/api/matching/run/{batch_b}", {"min_score": 0.55})
+        assert st == 200, f"persistent matching failed: {st}, {run}"
+        assert run["candidate_count"] >= 1
+
+        st, results = asyncio.run(make_request(app, "GET", f"/api/matching/results/{batch_b}"))
+        assert st == 200 and results["items"], f"matching results missing: {st}, {results}"
+        candidate_id = results["items"][0]["id"]
+
+        st, draft = asyncio.run(make_request(app, "POST", f"/api/national-materials/draft-from-candidate/{candidate_id}"))
+        assert st == 200, f"draft creation failed: {st}, {draft}"
+        national_code = draft["national_material"]["national_material_code"]
+        assert draft["national_material"]["status"] == "DRAFT"
+        assert len(draft["mappings"]) == 2
+
+        st, case_create = asyncio.run(make_request(app, "POST", f"/api/approvals/cases/from-national-material/{national_code}"))
+        assert st == 200, f"approval case creation failed: {st}, {case_create}"
+        case_id = case_create["case"]["id"]
+        assert case_create["case"]["current_stage"] == "PENDING_L1"
+
+        st, l1 = post_json(app, f"/api/approvals/cases/{case_id}/decision", {
+            "decision": "APPROVE",
+            "reviewer_note": "Verified duplicate bearing records for analytics verification.",
+        })
+        assert st == 200, f"L1 approval failed: {st}, {l1}"
+        assert l1["case"]["current_stage"] == "PENDING_L2"
+
+        st, l2 = post_json(app, f"/api/approvals/cases/{case_id}/decision", {
+            "decision": "APPROVE",
+            "reviewer_note": "Approved national material publication for analytics verification.",
+        })
+        assert st == 200, f"L2 approval failed: {st}, {l2}"
+        assert l2["case"]["approval_status"] == "APPROVED"
+        assert l2["case"]["national_material"]["status"] == "ACTIVE"
+
+        st, summary = asyncio.run(make_request(app, "GET", "/api/analytics/summary?days=30"))
+        assert st == 200, f"analytics summary failed: {st}, {summary}"
+        assert summary["days"] == 30
+        assert summary["total_source_materials"] == 2
+        assert summary["total_ingestion_batches"] == 2
+        assert summary["batches_completed"] == 2
+        assert summary["batches_with_errors"] == 0
+        assert summary["total_match_candidates"] >= 1
+        assert summary["duplicate_candidate_count"] >= 1
+        assert summary["candidate_counts_by_status"].get("APPROVED", 0) >= 1
+        assert summary["pending_l1_count"] == 0
+        assert summary["pending_l2_count"] == 0
+        assert summary["needs_more_info_count"] == 0
+        assert summary["approved_mapping_count"] == 2
+        assert summary["rejected_mapping_count"] == 0
+        assert summary["national_material_draft_count"] == 0
+        assert summary["national_material_active_count"] == 1
+        assert summary["national_material_rejected_count"] == 0
+        assert summary["estimated_approved_savings_inr"] > 0
+        assert summary["audit_event_count"] > 0
+        assert summary["audit_chain"]["last_sequence_number"] == summary["audit_event_count"]
+        assert summary["audit_chain"]["last_hash"] != "0" * 64
+
+        cpse_a = by_cpse(summary, "ANALYTICS_CPSE_A")
+        cpse_b = by_cpse(summary, "ANALYTICS_CPSE_B")
+        assert cpse_a["material_count"] == 1 and cpse_b["material_count"] == 1
+        assert cpse_a["batch_count"] == 1 and cpse_b["batch_count"] == 1
+        assert cpse_a["candidate_involvement_count"] >= 1 and cpse_b["candidate_involvement_count"] >= 1
+        assert cpse_a["approved_mapping_count"] == 1 and cpse_b["approved_mapping_count"] == 1
+
+        category = by_category(summary, "BEARINGS")
+        assert category["material_count"] == 2
+        assert category["candidate_involvement_count"] >= 1
+        assert category["active_national_material_count"] == 1
+
+        assert summary["ingestion_timeline"], "ingestion timeline should include current batches"
+        assert sum(point["batches_created"] for point in summary["ingestion_timeline"]) == 2
+        assert sum(point["source_materials_processed"] for point in summary["ingestion_timeline"]) == 2
+
+        assert summary["recent_activity"], "recent activity should include durable audit events"
+        timestamps = [event["timestamp"] for event in summary["recent_activity"]]
+        assert timestamps == sorted(timestamps), "recent activity should be chronological"
+        actions = {event["action"] for event in summary["recent_activity"]}
+        assert "NATIONAL_MATERIAL_PUBLISHED" in actions
+        assert not any("sample" in event["summary"].lower() for event in summary["recent_activity"])
+
+        st, seven_day = asyncio.run(make_request(app, "GET", "/api/analytics/summary?days=7"))
+        assert st == 200 and seven_day["days"] == 7
+
+        engine.dispose()
+
+    print(
+        "PASS Prompt 9 analytics verified: empty database zeros, durable workflow counts, "
+        "breakdowns, timeline, recent activity, audit-chain metadata, days validation, and no sample-data fallback."
+    )
+    return 0
+
 
 if __name__ == "__main__":
-    asyncio.run(run_tests())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"FAIL Prompt 9 verification failed: {exc}", file=sys.stderr)
+        raise

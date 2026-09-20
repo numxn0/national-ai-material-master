@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install backend dependencies
+        run: |
+          python -m venv backend\.venv
+          .\backend\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
+
+      - name: Backend verification
+        run: |
+          $scripts = Get-ChildItem .\backend -Filter 'verify*.py' | Sort-Object Name
+          foreach ($script in $scripts) {
+            .\backend\.venv\Scripts\python.exe $script.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Frontend install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend build
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: Basic dependency audit
+        working-directory: frontend
+        run: pnpm audit --audit-level high

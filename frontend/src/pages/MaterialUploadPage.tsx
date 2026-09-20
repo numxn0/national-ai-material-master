@@ -9,7 +9,16 @@ import {
   Wand2,
   Cpu
 } from 'lucide-react';
-import { previewSampleMaterials, previewCsvUpload, normalizeText, extractAttributes } from '../services/api';
+import {
+  previewSampleMaterials,
+  previewCsvUpload,
+  normalizeText,
+  extractAttributes,
+  ingestDurableCatalog,
+  runLegacyMigration,
+  rollbackMigrationJob,
+  importProcurementHistory,
+} from '../services/api';
 import { CSVPreviewResponseData, TextNormalizationResult, AttributeExtractionResult } from '../types';
 
 export const MaterialUploadPage: React.FC = () => {
@@ -19,6 +28,7 @@ export const MaterialUploadPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [previewData, setPreviewData] = useState<CSVPreviewResponseData | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [productionResult, setProductionResult] = useState<any | null>(null);
 
   // Advanced Tools Accordion State (Collapsed by default)
   const [showAdvancedTools, setShowAdvancedTools] = useState<boolean>(false);
@@ -198,7 +208,7 @@ export const MaterialUploadPage: React.FC = () => {
             type="file"
             ref={fileInputRef}
             onChange={handleFileChange}
-            accept=".csv"
+            accept=".csv,.xlsx"
             className="hidden"
           />
 
@@ -208,10 +218,10 @@ export const MaterialUploadPage: React.FC = () => {
           >
             <UploadCloud className="w-8 h-8 text-blue-600 mb-2" />
             <h4 className="text-sm font-semibold text-gray-900">
-              {selectedFile ? selectedFile.name : 'Click to select CSV spreadsheet or drag & drop'}
+              {selectedFile ? selectedFile.name : 'Click to select CSV/XLSX spreadsheet or drag & drop'}
             </h4>
             <p className="text-xs text-gray-500 mt-1">
-              Supports standard CPSE procurement format with item codes, descriptions, and units.
+              Supports standard CPSE material and procurement formats with item codes, descriptions, units, and purchase history.
             </p>
           </div>
 
@@ -221,13 +231,116 @@ export const MaterialUploadPage: React.FC = () => {
             </span>
             <button
               onClick={handleUploadPreview}
-              disabled={isLoading || !selectedFile}
+              disabled={isLoading || !selectedFile || !selectedFile.name.toLowerCase().endsWith('.csv')}
               className="px-4 py-2 rounded-md bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
             >
               Parse Selected File
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Production Workbench */}
+      <div className="bg-white border border-gray-200 rounded-lg p-5 shadow-sm space-y-4">
+        <div>
+          <h3 className="text-sm font-bold text-gray-900">Production Workbench</h3>
+          <p className="text-xs text-gray-500 mt-1">
+            Requires login. Runs durable CSV ingestion, legacy migration dry-run/import/rollback, and actual procurement-history import.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={async () => {
+              if (!selectedFile) return setErrorMessage('Select a CSV file for durable catalog ingestion.');
+              setIsLoading(true);
+              try {
+                setProductionResult(await ingestDurableCatalog(selectedFile, selectedPsu, selectedSystem));
+              } catch (err: any) {
+                setErrorMessage(err.message);
+              } finally {
+                setIsLoading(false);
+              }
+            }}
+            disabled={!selectedFile || isLoading || !selectedFile.name.toLowerCase().endsWith('.csv')}
+            className="px-3.5 py-2 rounded-md bg-green-600 text-white text-xs font-semibold disabled:opacity-50"
+          >
+            Durable CSV Import
+          </button>
+          <button
+            onClick={async () => {
+              if (!selectedFile) return setErrorMessage('Select a CSV/XLSX file first.');
+              setIsLoading(true);
+              try {
+                setProductionResult(await runLegacyMigration(selectedFile, selectedPsu, selectedSystem, true));
+              } catch (err: any) {
+                setErrorMessage(err.message);
+              } finally {
+                setIsLoading(false);
+              }
+            }}
+            disabled={!selectedFile || isLoading}
+            className="px-3.5 py-2 rounded-md border border-gray-300 bg-white text-gray-700 text-xs font-medium disabled:opacity-50"
+          >
+            Migration Dry-Run
+          </button>
+          <button
+            onClick={async () => {
+              if (!selectedFile) return setErrorMessage('Select a CSV/XLSX file first.');
+              setIsLoading(true);
+              try {
+                setProductionResult(await runLegacyMigration(selectedFile, selectedPsu, selectedSystem, false));
+              } catch (err: any) {
+                setErrorMessage(err.message);
+              } finally {
+                setIsLoading(false);
+              }
+            }}
+            disabled={!selectedFile || isLoading}
+            className="px-3.5 py-2 rounded-md bg-blue-600 text-white text-xs font-semibold disabled:opacity-50"
+          >
+            Migration Import
+          </button>
+          <button
+            onClick={async () => {
+              const jobId = productionResult?.job?.id;
+              if (!jobId) return setErrorMessage('Run a migration import before rollback.');
+              setIsLoading(true);
+              try {
+                setProductionResult(await rollbackMigrationJob(jobId));
+              } catch (err: any) {
+                setErrorMessage(err.message);
+              } finally {
+                setIsLoading(false);
+              }
+            }}
+            disabled={!productionResult?.job?.id || isLoading}
+            className="px-3.5 py-2 rounded-md border border-red-300 bg-white text-red-700 text-xs font-medium disabled:opacity-50"
+          >
+            Safe Rollback
+          </button>
+          <button
+            onClick={async () => {
+              if (!selectedFile) return setErrorMessage('Select a procurement CSV/XLSX file first.');
+              setIsLoading(true);
+              try {
+                setProductionResult(await importProcurementHistory(selectedFile));
+              } catch (err: any) {
+                setErrorMessage(err.message);
+              } finally {
+                setIsLoading(false);
+              }
+            }}
+            disabled={!selectedFile || isLoading}
+            className="px-3.5 py-2 rounded-md bg-slate-800 text-white text-xs font-semibold disabled:opacity-50"
+          >
+            Import Procurement History
+          </button>
+        </div>
+        {productionResult && (
+          <pre className="text-[11px] bg-gray-50 border border-gray-200 rounded p-3 overflow-x-auto text-gray-700">
+            {JSON.stringify(productionResult, null, 2)}
+          </pre>
+        )}
       </div>
 
       {/* Main Table: Uploaded Materials */}

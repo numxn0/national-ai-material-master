@@ -1,16 +1,29 @@
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import JSONResponse
 from typing import Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
+from sqlalchemy.orm import Session
 
+from app.core.auth import require_roles
+from app.db.session import get_db
+from app.services.auth import AuthenticatedUser
 from app.schemas.audit import (
     AuditLogResponse,
     AuditTrailResponse,
     AuditChainVerificationResponse,
+    PersistentAuditEventResponse,
+    PersistentAuditEventsResponse,
+    PersistentAuditVerificationResponse,
 )
 from app.schemas.examples import EXAMPLE_AUDIT_LOG
 from app.services.audit_trail import (
     build_demo_audit_trail,
     verify_audit_chain_integrity,
+)
+from app.services.persistent_audit import (
+    event_payload,
+    list_audit_events,
+    verify_persistent_audit_chain,
 )
 
 router = APIRouter(prefix="/audit", tags=["Audit & Compliance Trail"])
@@ -87,6 +100,56 @@ async def verify_demo_audit_chain():
             status_code=500,
             detail=f"Failed to verify audit chain integrity: {str(exc)}"
         )
+
+
+# --- Persistent Production Audit Endpoints ---
+
+@router.get("/events", response_model=PersistentAuditEventsResponse, tags=["Persistent Audit Ledger"])
+async def get_persistent_audit_events(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    entity_type: str | None = Query(None),
+    entity_id: str | None = Query(None),
+    action: str | None = Query(None),
+    actor: str | None = Query(None),
+    from_timestamp: datetime | None = Query(None),
+    to_timestamp: datetime | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "AUDITOR")),
+):
+    total, events = list_audit_events(
+        db,
+        page=page,
+        limit=limit,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        action=action,
+        actor=actor,
+        from_timestamp=from_timestamp,
+        to_timestamp=to_timestamp,
+    )
+    return PersistentAuditEventsResponse(
+        count=len(events),
+        total=total,
+        page=page,
+        limit=limit,
+        items=[PersistentAuditEventResponse(**event_payload(event)) for event in events],
+    )
+
+
+@router.post("/verify", response_model=PersistentAuditVerificationResponse, tags=["Persistent Audit Ledger"])
+async def verify_persistent_audit_ledger(
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "AUDITOR")),
+):
+    result = verify_persistent_audit_chain(db)
+    response = PersistentAuditVerificationResponse(
+        **result,
+        verification_timestamp=datetime.now(timezone.utc),
+    )
+    if result["status"] != "CHAIN_INTACT":
+        return JSONResponse(status_code=409, content=response.model_dump(mode="json"))
+    return response
 
 
 # --- Legacy / Canonical Endpoints ---

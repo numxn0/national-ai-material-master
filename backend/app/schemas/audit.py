@@ -88,3 +88,43 @@ class AuditChainVerificationResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+class PersistentAuditEventResponse(BaseModel):
+    id: UUID
+    audit_id: str
+    sequence_number: int
+    timestamp: datetime
+    actor: str
+    actor_role: str
+    action: str
+    entity_type: str
+    entity_id: str
+    old_value: Optional[Dict[str, Any]] = None
+    new_value: Optional[Dict[str, Any]] = None
+    reason: Optional[str] = None
+    method_version: str
+    previous_hash: str
+    hash_signature: str
+    verification_status: str
+    created_at: datetime
+
+
+class PersistentAuditEventsResponse(BaseModel):
+    status: str = "success"
+    count: int
+    total: int
+    page: int
+    limit: int
+    items: List[PersistentAuditEventResponse] = Field(default_factory=list)
+
+
+class PersistentAuditVerificationResponse(BaseModel):
+    status: str
+    total_events: int
+    verified_events: int
+    chain_tip_hash: str
+    first_broken_sequence: Optional[int] = None
+    first_broken_event_id: Optional[str] = None
+    reason: str
+    verification_timestamp: datetime
+

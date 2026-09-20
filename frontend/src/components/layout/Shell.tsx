@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -9,6 +9,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { getAuthenticatedUser, login, logout } from '@/services/api';
 
 interface ShellProps {
   children: React.ReactNode;
@@ -16,6 +17,10 @@ interface ShellProps {
 
 export const Shell: React.FC<ShellProps> = ({ children }) => {
   const location = useLocation();
+  const [user, setUser] = useState<any | null>(getAuthenticatedUser());
+  const [username, setUsername] = useState('demo_admin');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const navItems = [
     {
@@ -72,7 +77,6 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
                 National AI <br />
                 <span className="text-gray-600 font-normal">Material Master</span>
               </h1>
-              <span className="text-[10px] font-medium text-blue-600">SIH 2024 Prototype</span>
             </div>
           </div>
 
@@ -115,7 +119,7 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             <span className="font-medium text-gray-700">Govt. of India</span>
             <span className="text-[11px] text-gray-400 font-mono">v1.0 Demo</span>
           </div>
-          <p className="text-[11px] text-gray-400">In-Memory Mode • No DB</p>
+          <p className="text-[11px] text-gray-400">{user ? 'Production APIs • Authenticated' : 'Demo routes available • Login for production'}</p>
         </div>
       </aside>
 
@@ -129,10 +133,55 @@ export const Shell: React.FC<ShellProps> = ({ children }) => {
             <span className="text-gray-900 font-semibold">{getPageTitle()}</span>
           </div>
 
-          <div className="flex items-center gap-3 text-xs text-gray-500">
-            <span className="px-2.5 py-1 rounded bg-gray-100 text-gray-600 font-medium border border-gray-200">
-              Examiner Demo Mode
-            </span>
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            {user ? (
+              <>
+                <span className="px-2.5 py-1 rounded bg-green-50 text-green-700 font-medium border border-green-200">
+                  {user.display_name} • {(user.roles || []).join(', ')}
+                </span>
+                <button
+                  onClick={() => {
+                    logout();
+                    setUser(null);
+                  }}
+                  className="px-2.5 py-1 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+                >
+                  Logout
+                </button>
+              </>
+            ) : (
+              <form
+                className="flex items-center gap-2"
+                onSubmit={async (event) => {
+                  event.preventDefault();
+                  setAuthError(null);
+                  try {
+                    setUser(await login(username, password));
+                    setPassword('');
+                  } catch (err: any) {
+                    setAuthError(err.message || 'Login failed');
+                  }
+                }}
+              >
+                <input
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="w-28 rounded border border-gray-300 px-2 py-1 text-xs"
+                  placeholder="Username"
+                />
+                <input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  className="w-32 rounded border border-gray-300 px-2 py-1 text-xs"
+                  placeholder="Password"
+                />
+                <button className="px-2.5 py-1 rounded bg-blue-600 text-white font-medium">
+                  Login
+                </button>
+                {authError && <span className="text-red-600 max-w-48 truncate">{authError}</span>}
+              </form>
+            )}
           </div>
         </header>
 

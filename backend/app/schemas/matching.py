@@ -1,4 +1,5 @@
 from enum import Enum
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
@@ -72,3 +73,59 @@ class CandidateMatchResponse(BaseModel):
     candidates: List[CandidateMatchResult] = Field(default_factory=list, description="Ranked list of detected duplicate candidates")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class DurableMatchingRunRequest(BaseModel):
+    min_score: float = Field(default=0.65, ge=0.0, le=1.0, description="Minimum candidate score retained from the rule pipeline")
+
+
+class DurableMatchingRunResponse(BaseModel):
+    status: str = "success"
+    batch_id: UUID
+    candidate_count: int
+    created_count: int
+    updated_count: int
+    compared_record_count: int
+    matching_config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PersistedMaterialSummary(BaseModel):
+    id: UUID
+    source_cpse: str
+    source_system: str
+    source_material_code: str
+    standard_description: Optional[str] = None
+    raw_description: str
+    category: str
+    uom: str
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PersistedMatchCandidateResponse(BaseModel):
+    id: UUID
+    pair_id: str
+    source_material_a_id: Optional[UUID] = None
+    source_material_b_id: Optional[UUID] = None
+    source_material_a: Optional[PersistedMaterialSummary] = None
+    source_material_b: Optional[PersistedMaterialSummary] = None
+    candidate_score: float
+    hybrid_score: Optional[float] = None
+    classification: Optional[str] = None
+    status: str
+    score_details: Dict[str, Any] = Field(default_factory=dict)
+    explanation: Dict[str, Any] = Field(default_factory=dict)
+    method_version: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PersistedMatchResultsResponse(BaseModel):
+    status: str = "success"
+    batch_id: UUID
+    count: int
+    total: int
+    page: int
+    limit: int
+    items: List[PersistedMatchCandidateResponse] = Field(default_factory=list)
