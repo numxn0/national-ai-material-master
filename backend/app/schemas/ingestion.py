@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -11,6 +11,7 @@ class IngestionStatus(str, Enum):
     SANITIZING = "SANITIZING"
     MATCHING = "MATCHING"
     COMPLETED = "COMPLETED"
+    COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
     FAILED = "FAILED"
 
 
@@ -41,7 +42,6 @@ class IngestionBatchResponse(IngestionBatchBase):
     model_config = ConfigDict(from_attributes=True)
 
 
-from typing import List
 from .material import SourceMaterialResponse
 
 
@@ -71,3 +71,50 @@ class CSVPreviewResponse(BaseModel):
     mapped_columns: Dict[str, str] = Field(default_factory=dict, description="Mapping from source column to canonical field")
     valid_records: List[SourceMaterialResponse] = Field(default_factory=list, description="Normalized SourceMaterial-shaped preview records")
     invalid_rows: List[CSVPreviewRowError] = Field(default_factory=list, description="Rows rejected during parsing with reasons")
+
+
+class IngestionRowErrorResponse(BaseModel):
+    id: UUID
+    ingestion_batch_id: UUID
+    row_number: int
+    source_material_code: Optional[str] = None
+    raw_data: Dict[str, Any] = Field(default_factory=dict)
+    reason: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PersistedSourceMaterialResponse(SourceMaterialResponse):
+    metadata_json: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CSVIngestResponse(BaseModel):
+    success: bool = True
+    message: str
+    idempotent_replay: bool = False
+    batch: IngestionBatchResponse
+    processed_records: int
+    failed_records: int
+    error_count: int
+
+
+class IngestionBatchDetailResponse(BaseModel):
+    batch: IngestionBatchResponse
+    error_count: int
+    errors: List[IngestionRowErrorResponse] = Field(default_factory=list)
+    page: int = 1
+    limit: int = 50
+
+
+class PersistedMaterialsPageResponse(BaseModel):
+    status: str = "success"
+    message: str = "Persisted source materials retrieved successfully"
+    batch_id: UUID
+    count: int
+    total: int
+    page: int
+    limit: int
+    items: List[PersistedSourceMaterialResponse] = Field(default_factory=list)

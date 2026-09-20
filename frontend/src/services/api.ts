@@ -1,4 +1,45 @@
+import type { AnalyticsSummaryResponse } from '@/types';
+
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+let authToken: string | null = null;
+let authUser: any | null = null;
+
+function authHeaders(extra: Record<string, string> = {}) {
+  return authToken ? { ...extra, Authorization: `Basic ${authToken}` } : extra;
+}
+
+async function apiFetch(path: string, init: RequestInit = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: authHeaders((init.headers as Record<string, string>) || {}),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || `API request failed with HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+export function getAuthenticatedUser() {
+  return authUser;
+}
+
+export function logout() {
+  authToken = null;
+  authUser = null;
+}
+
+export async function login(username: string, password: string) {
+  authToken = btoa(`${username}:${password}`);
+  try {
+    authUser = await apiFetch('/api/auth/me');
+    return authUser;
+  } catch (err) {
+    logout();
+    throw err;
+  }
+}
 
 export async function fetchHealth() {
   try {
@@ -331,6 +372,75 @@ export async function fetchDemoSummary() {
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || `Failed to fetch demo summary: HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+export async function ingestDurableCatalog(file: File, sourceCpse: string, sourceSystem: string) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('source_cpse', sourceCpse);
+  formData.append('source_system', sourceSystem);
+  return apiFetch('/api/materials/ingest-csv', { method: 'POST', body: formData });
+}
+
+export async function runLegacyMigration(file: File, sourceCpse: string, sourceSystem: string, dryRun: boolean) {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('source_cpse', sourceCpse);
+  formData.append('source_system', sourceSystem);
+  formData.append('dry_run', String(dryRun));
+  return apiFetch('/api/migration/legacy-materials', { method: 'POST', body: formData });
+}
+
+export async function rollbackMigrationJob(jobId: string) {
+  return apiFetch(`/api/migration/jobs/${jobId}/rollback`, { method: 'POST' });
+}
+
+export async function fetchPersistedMatchingResults(batchId: string) {
+  return apiFetch(`/api/matching/results/${batchId}?limit=50`);
+}
+
+export async function draftNationalCode(candidateId: string) {
+  return apiFetch(`/api/national-materials/draft-from-candidate/${candidateId}`, { method: 'POST' });
+}
+
+export async function fetchPersistentApprovalCases() {
+  return apiFetch('/api/approvals/cases?limit=50');
+}
+
+export async function submitPersistentApprovalDecision(caseId: string, decision: 'APPROVE' | 'REJECT' | 'NEEDS_MORE_INFO') {
+  return apiFetch(`/api/approvals/cases/${caseId}/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision }),
+  });
+}
+
+export async function fetchPersistentAuditEvents() {
+  return apiFetch('/api/audit/events?limit=100');
+}
+
+export async function verifyPersistentAuditChain() {
+  return apiFetch('/api/audit/verify', { method: 'POST' });
+}
+
+export async function importProcurementHistory(file: File) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return apiFetch('/api/procurement/history/import', { method: 'POST', body: formData });
+}
+
+export async function fetchProcurementAnalytics() {
+  return apiFetch('/api/procurement/analytics');
+}
+
+export async function fetchAnalyticsSummary(days: number = 30): Promise<AnalyticsSummaryResponse> {
+  const safeDays = [7, 30, 90].includes(days) ? days : 30;
+  const res = await fetch(`${API_BASE}/api/analytics/summary?days=${safeDays}`);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Failed to fetch analytics summary: HTTP ${res.status}`);
   }
   return await res.json();
 }

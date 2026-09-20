@@ -1,172 +1,246 @@
 """
-Prompt 7 Comprehensive Verification Script.
-Tests RapidFuzz candidate duplicate detection, scoring weights, blocking filters,
-critical attribute conflict penalties, API endpoints, and sample dataset clusters.
+Prompt 7 verification: persistent append-only, hash-chained audit ledger.
+
+Uses a temporary SQLite database only. No developer or production database is touched.
 """
 
-import sys
-import json
 import asyncio
+import json
+import os
+import sys
+import tempfile
+import uuid
 from pathlib import Path
 
-# Add backend root to sys.path
-backend_root = Path(__file__).resolve().parent
-sys.path.insert(0, str(backend_root))
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
-from app.services.candidate_matching import (
-    calculate_text_similarity,
-    calculate_token_similarity,
-    calculate_attribute_similarity,
-    calculate_category_compatibility,
-    calculate_uom_compatibility,
-    calculate_candidate_score,
-    classify_candidate,
-    generate_candidate_pairs,
-    find_duplicate_candidates,
-    _is_category_incompatible,
-)
-from app.schemas.matching import (
-    CandidateClassification,
-    CandidateMatchRequest,
-    CandidateMatchResponse,
-    CandidateMatchResult,
-)
-from app.schemas.material import SourceMaterialResponse
-from app.api.matching import detect_duplicate_candidates, detect_sample_duplicate_candidates
-from main import health_check
-import uuid
-from datetime import datetime
+backend_dir = Path(__file__).resolve().parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
+DEFAULT_HEADERS: list[tuple[bytes, bytes]] = []
 
 
-from app.services.normalization import build_standard_description
+def install_verify_admin(SessionLocal):
+    from app.services.auth import create_or_update_local_user
 
-def make_test_material(code: str, desc: str, cat: str, uom: str, attrs: dict) -> SourceMaterialResponse:
-    now = datetime.utcnow()
-    std = build_standard_description(desc)
-    return SourceMaterialResponse(
-        id=uuid.uuid4(),
-        source_cpse="TEST_PSU",
-        source_system="TEST_ERP",
-        source_material_code=code,
-        raw_description=desc,
-        cleaned_description=desc.lower(),
-        standard_description=std,
-        category=cat,
-        sub_category="GENERAL",
-        material_type=None,
-        material_grade=attrs.get("material_grade"),
-        manufacturer=attrs.get("manufacturer"),
-        part_number=attrs.get("part_number"),
-        model_number=attrs.get("model_number"),
-        uom=uom,
-        attributes=attrs,
-        normalized_tokens=std.lower().split(),
-        ingestion_batch_id=None,
-        created_at=now,
-        updated_at=now,
+    with SessionLocal() as db:
+        create_or_update_local_user(
+            db,
+            username="verify_admin",
+            password="verify-pass",
+            display_name="Verify Admin",
+            roles=["ADMIN", "AUDITOR"],
+        )
+    global DEFAULT_HEADERS
+    DEFAULT_HEADERS = [(b"authorization", b"Basic dmVyaWZ5X2FkbWluOnZlcmlmeS1wYXNz")]
+
+
+def multipart_body(fields: dict, file_field: str, filename: str, content: bytes):
+    boundary = f"----namm-{uuid.uuid4().hex}"
+    chunks = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+        chunks.append(str(value).encode())
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}\r\n".encode())
+    chunks.append(
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+        "Content-Type: text/csv\r\n\r\n".encode()
+    )
+    chunks.append(content)
+    chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(chunks)
+    return body, f"multipart/form-data; boundary={boundary}"
+
+
+async def make_request(app, method: str, path: str, body: bytes = b"", headers: list[tuple[bytes, bytes]] | None = None):
+    if "?" in path:
+        route_path, query_string = path.split("?", 1)
+    else:
+        route_path, query_string = path, ""
+    all_headers = [(b"host", b"testserver"), *DEFAULT_HEADERS]
+    if body:
+        all_headers.append((b"content-length", str(len(body)).encode()))
+    if headers:
+        all_headers.extend(headers)
+
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": method,
+        "path": route_path,
+        "raw_path": route_path.encode("utf-8"),
+        "query_string": query_string.encode("utf-8"),
+        "headers": all_headers,
+    }
+    response_body = []
+    status_code = 0
+    sent = False
+
+    async def receive():
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        nonlocal status_code
+        if message["type"] == "http.response.start":
+            status_code = message["status"]
+        elif message["type"] == "http.response.body":
+            response_body.append(message.get("body", b""))
+
+    await app(scope, receive, send)
+    raw = b"".join(response_body).decode("utf-8")
+    return status_code, json.loads(raw) if raw else None
+
+
+def upload_body(csv_text: str, source_cpse: str, filename: str):
+    return multipart_body(
+        {"source_cpse": source_cpse, "source_system": "VERIFY_ERP"},
+        "file",
+        filename,
+        csv_text.encode("utf-8"),
     )
 
 
-async def run_prompt7_verification():
-    print("=" * 70)
-    print("PROMPT 7: CANDIDATE DUPLICATE DETECTION (RAPIDFUZZ) VERIFICATION")
-    print("=" * 70)
+def json_body(payload: dict):
+    return json.dumps(payload).encode("utf-8"), "application/json"
 
-    # 1. Health Check
-    health = await health_check()
-    assert health.status == "healthy"
-    print(f"\n[PASS] Backend /health returned 200 OK (status: {health.status})")
 
-    # 2. Text Similarity Test via RapidFuzz
-    print("\n--- Testing RapidFuzz Text Similarity ---")
-    m1 = make_test_material("M1", "BALL BEARING 6205-2RS SKF DEEP GROOVE", "BEARINGS", "EA", {})
-    m2 = make_test_material("M2", "SKF DEEP GROOVE BALL BEARING 6205 2RS", "BEARINGS", "EA", {})
-    m3 = make_test_material("M3", "GATE VALVE 100MM CLASS 150 FLANGED", "VALVES", "EA", {})
+def post_json(app, path: str, payload: dict):
+    body, content_type = json_body(payload)
+    return asyncio.run(make_request(app, "POST", path, body, [(b"content-type", content_type.encode())]))
 
-    sim_high, _ = calculate_text_similarity(m1, m2)
-    sim_low, _ = calculate_text_similarity(m1, m3)
-    assert sim_high >= 0.80, f"Expected high text sim, got {sim_high}"
-    assert sim_low < 0.40, f"Expected low text sim, got {sim_low}"
-    print(f" [PASS] Reordered text similarity: {sim_high:.4f} (>= 0.80)")
-    print(f" [PASS] Disparate text similarity: {sim_low:.4f} (< 0.35)")
 
-    # 3. Category Incompatibility & Blocking Filter
-    print("\n--- Testing Taxonomy Domain Blocking ---")
-    assert _is_category_incompatible("BEARINGS", "ELECTRICAL_CABLES") is True
-    assert _is_category_incompatible("VALVES", "MOTORS") is True
-    assert _is_category_incompatible("PIPES_AND_TUBES", "FASTENERS") is True
-    assert _is_category_incompatible("BEARINGS", "BEARINGS") is False
-    assert _is_category_incompatible("BEARINGS", "MECHANICAL_SPARES") is False
-    print(" [PASS] Blocking rules correctly flag mutually exclusive categories and permit compatible parent hierarchies.")
+def main() -> int:
+    with tempfile.TemporaryDirectory(prefix="namm_prompt7_") as tmp:
+        db_path = Path(tmp) / "verify_prompt7.db"
+        os.environ["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
 
-    # 4. Critical Attribute Conflicts
-    print("\n--- Testing Critical Attribute Conflict Penalties ---")
-    # Bearing Number Mismatch
-    b_6205 = make_test_material("B1", "BALL BEARING 6205 ZZ SKF", "BEARINGS", "EA", {"bearing_number": "6205"})
-    b_6305 = make_test_material("B2", "BALL BEARING 6305 ZZ SKF", "BEARINGS", "EA", {"bearing_number": "6305"})
-    score_b, _, _, conflicts_b, rec_b = calculate_candidate_score(b_6205, b_6305)
-    assert any(c.attribute == "bearing_number" for c in conflicts_b), "Missing bearing_number conflict"
-    assert score_b <= 0.50, f"Score should be capped on critical conflict, got {score_b}"
-    print(f" [PASS] Bearing number mismatch (6205 vs 6305) penalized: score={score_b:.4f}, conflicts={[c.description for c in conflicts_b]}")
+        from alembic import command
+        from alembic.config import Config
+        from sqlalchemy import select, update
 
-    # Voltage Mismatch
-    c_24v = make_test_material("C1", "24V DC MOTOR 0.5 HP", "MOTORS", "EA", {"voltage": "24V"})
-    c_415v = make_test_material("C2", "415V AC MOTOR 5 HP 1440 RPM", "MOTORS", "EA", {"voltage": "415V"})
-    score_v, _, _, conflicts_v, rec_v = calculate_candidate_score(c_24v, c_415v)
-    assert any(c.attribute == "voltage" for c in conflicts_v)
-    assert score_v <= 0.50
-    print(f" [PASS] Motor voltage mismatch (24V vs 415V) penalized: score={score_v:.4f}")
+        alembic_cfg = Config(str(backend_dir / "alembic.ini"))
+        alembic_cfg.set_main_option("script_location", str(backend_dir / "alembic"))
+        command.upgrade(alembic_cfg, "head")
 
-    # Diameter Mismatch
-    p_50 = make_test_material("P1", "SS PIPE 50 NB SCH 40", "PIPES_AND_TUBES", "M", {"diameter_mm": 50.0})
-    p_100 = make_test_material("P2", "SS PIPE 100 NB SCH 40", "PIPES_AND_TUBES", "M", {"diameter_mm": 100.0})
-    score_d, _, _, conflicts_d, rec_d = calculate_candidate_score(p_50, p_100)
-    assert any(c.attribute == "nominal_diameter" for c in conflicts_d)
-    assert score_d <= 0.50
-    print(f" [PASS] Pipe diameter mismatch (50 NB vs 100 NB) penalized: score={score_d:.4f}")
+        from app.db.models import AuditEvent, MatchCandidate
+        from app.db.session import SessionLocal, engine
+        from main import app
+        install_verify_admin(SessionLocal)
 
-    # 5. High Confidence Duplicate Alignment
-    print("\n--- Testing High Confidence Duplicate Alignment ---")
-    pipe_a = make_test_material("PA", "SS PIPE 50 NB SCH 40 ASTM A312", "PIPES_AND_TUBES", "M", {
-        "material": "STAINLESS_STEEL", "nominal_bore": "50 NB", "schedule": "SCH 40", "diameter_mm": 50.0
-    })
-    pipe_b = make_test_material("PB", "STAINLESS STEEL PIPE 50 NOMINAL BORE SCHEDULE 40 ASTM A312", "PIPES_AND_TUBES", "M", {
-        "material": "STAINLESS_STEEL", "nominal_bore": "50 NB", "schedule": "SCH 40", "diameter_mm": 50.0
-    })
-    score_pipe, bd_pipe, sigs_pipe, _, rec_pipe = calculate_candidate_score(pipe_a, pipe_b)
-    tier_pipe = classify_candidate(score_pipe)
-    assert score_pipe >= 0.85
-    print(f" [PASS] Matched identical engineering pipe: score={score_pipe:.4f} ({tier_pipe.value})")
-    print(f"        Recommendation: {rec_pipe}")
+        csv_a = """item_code,description,uom,category,manufacturer
+AUD-BRG-6205-A,DEEP GROOVE BALL BEARING 6205 2RS C3 SKF,NOS,BEARINGS,SKF
+"""
+        csv_b = """item_code,description,uom,category,manufacturer
+AUD-BRG-6205-B,BALL BEARING 6205-2RS DEEP GROOVE SKF,NOS,BEARINGS,SKF
+"""
+        body_a, type_a = upload_body(csv_a, "AUDIT_CPSE_A", "audit_a.csv")
+        st, ingest_a = asyncio.run(make_request(app, "POST", "/api/materials/ingest-csv", body_a, [(b"content-type", type_a.encode())]))
+        assert st == 200, f"ingest A failed: {st}, {ingest_a}"
 
-    # 6. Sample CSV Duplicate Detection
-    print("\n--- Testing Sample CSV Duplicate Detection (/api/matching/candidates/sample) ---")
-    sample_res = await detect_sample_duplicate_candidates(min_score=0.65)
-    assert isinstance(sample_res, CandidateMatchResponse)
-    assert sample_res.total_records == 10
-    assert sample_res.compared_pairs > 0
-    assert sample_res.candidate_count >= 4, f"Expected at least 4 candidates, got {sample_res.candidate_count}"
+        body_b, type_b = upload_body(csv_b, "AUDIT_CPSE_B", "audit_b.csv")
+        st, ingest_b = asyncio.run(make_request(app, "POST", "/api/materials/ingest-csv", body_b, [(b"content-type", type_b.encode())]))
+        assert st == 200, f"ingest B failed: {st}, {ingest_b}"
+        batch_b = ingest_b["batch"]["id"]
 
-    print(f" [PASS] Sample scan processed {sample_res.total_records} records, {sample_res.compared_pairs} pairs.")
-    print(f" [PASS] Discovered {sample_res.candidate_count} candidates meeting threshold >= 0.65:")
-    for idx, c in enumerate(sample_res.candidates, 1):
-        print(f"        #{idx}: {c.pair_id:<42} Score: {c.score*100:5.1f}% [{c.classification.value}]")
+        run_body, run_type = json_body({"min_score": 0.65})
+        st, run = asyncio.run(make_request(app, "POST", f"/api/matching/run/{batch_b}", run_body, [(b"content-type", run_type.encode())]))
+        assert st == 200 and run["candidate_count"] >= 1, f"matching failed: {st}, {run}"
 
-    # 7. POST /api/matching/candidates Endpoint
-    print("\n--- Testing POST /api/matching/candidates ---")
-    test_req = CandidateMatchRequest(
-        materials=[pipe_a, pipe_b],
-        min_score=0.65
-    )
-    post_res = await detect_duplicate_candidates(test_req)
-    assert post_res.candidate_count == 1
-    assert post_res.candidates[0].score >= 0.85
-    print(f" [PASS] POST /api/matching/candidates executed successfully with {post_res.candidate_count} candidate pair.")
+        with SessionLocal() as db:
+            candidate = db.execute(select(MatchCandidate).order_by(MatchCandidate.hybrid_score.desc())).scalars().first()
+            assert candidate is not None
+            candidate_id = str(candidate.id)
 
-    print("\n" + "=" * 70)
-    print("ALL PROMPT 7 VERIFICATION CHECKS PASSED WITH ZERO ERRORS!")
-    print("=" * 70)
+        st, draft = asyncio.run(make_request(app, "POST", f"/api/national-materials/draft-from-candidate/{candidate_id}"))
+        assert st == 200, f"draft failed: {st}, {draft}"
+        national_code = draft["national_material"]["national_material_code"]
+
+        st, case_create = asyncio.run(make_request(app, "POST", f"/api/approvals/cases/from-national-material/{national_code}"))
+        assert st == 200, f"case create failed: {st}, {case_create}"
+        case_id = case_create["case"]["id"]
+
+        st, l1 = post_json(app, f"/api/approvals/cases/{case_id}/decision", {
+            "decision": "APPROVE",
+            "reviewer_note": "Audit path L1 verification.",
+        })
+        assert st == 200, f"L1 failed: {st}, {l1}"
+
+        st, l2 = post_json(app, f"/api/approvals/cases/{case_id}/decision", {
+            "decision": "APPROVE",
+            "reviewer_note": "Audit path L2 publication.",
+        })
+        assert st == 200, f"L2 failed: {st}, {l2}"
+
+        st, events_page = asyncio.run(make_request(app, "GET", "/api/audit/events?page=1&limit=5"))
+        assert st == 200, f"events page failed: {st}, {events_page}"
+        assert events_page["count"] == 5
+        assert events_page["total"] >= 10
+        assert events_page["items"][0]["sequence_number"] == 1
+
+        st, draft_events = asyncio.run(make_request(app, "GET", "/api/audit/events?action=NATIONAL_MATERIAL_DRAFT_CREATED"))
+        assert st == 200 and draft_events["total"] == 1
+        national_id = draft_events["items"][0]["entity_id"]
+
+        st, national_events = asyncio.run(make_request(app, "GET", f"/api/audit/events?entity_type=national_material&entity_id={national_id}"))
+        assert st == 200 and national_events["total"] >= 2
+
+        st, verify_ok = asyncio.run(make_request(app, "POST", "/api/audit/verify"))
+        assert st == 200, f"verify intact failed: {st}, {verify_ok}"
+        assert verify_ok["status"] == "CHAIN_INTACT"
+        assert verify_ok["verified_events"] == verify_ok["total_events"]
+
+        actions = {event["action"] for event in asyncio.run(make_request(app, "GET", "/api/audit/events?page=1&limit=200"))[1]["items"]}
+        expected_actions = {
+            "MATERIALS_INGESTED",
+            "MATCHING_RUN_COMPLETED",
+            "NATIONAL_MATERIAL_DRAFT_CREATED",
+            "APPROVAL_CASE_CREATED",
+            "APPROVAL_L1_APPROVED",
+            "APPROVAL_L2_APPROVED",
+            "MATERIAL_MAPPINGS_STATUS_CHANGED",
+            "NATIONAL_MATERIAL_PUBLISHED",
+        }
+        missing = expected_actions - actions
+        assert not missing, f"missing audit actions: {missing}"
+
+        with SessionLocal() as db:
+            db.execute(
+                update(AuditEvent)
+                .where(AuditEvent.sequence_number == 2)
+                .values(reason="tampered without recomputing hash")
+            )
+            db.commit()
+
+        st, verify_bad = asyncio.run(make_request(app, "POST", "/api/audit/verify"))
+        assert st == 409, f"tampered verify should return 409: {st}, {verify_bad}"
+        assert verify_bad["status"] == "CHAIN_BROKEN"
+        assert verify_bad["first_broken_sequence"] == 2
+
+        st, demo_trail = asyncio.run(make_request(app, "GET", "/api/audit/demo-trail"))
+        assert st == 200 and demo_trail["total_events"] >= 1
+        st, demo_verify = asyncio.run(make_request(app, "POST", "/api/audit/demo-verify"))
+        assert st == 200 and demo_verify["chain_status"] == "CHAIN_INTACT"
+
+        engine.dispose()
+
+    print("PASS Prompt 7 persistent audit ledger verified: events, filters, intact chain, tamper detection, demo compatibility.")
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(run_prompt7_verification())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"FAIL Prompt 7 verification failed: {exc}", file=sys.stderr)
+        raise

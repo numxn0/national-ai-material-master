@@ -3,7 +3,9 @@ Pydantic schemas for deterministic semantic embeddings and vector similarity.
 Designed to be drop-in ready for future pgvector and Sentence Transformer models.
 """
 
+from datetime import datetime
 from typing import Optional, List, Dict, Any
+from uuid import UUID
 from pydantic import BaseModel, Field, ConfigDict
 from app.schemas.material import SourceMaterialResponse
 
@@ -145,3 +147,59 @@ class SemanticSampleComparisonResponse(BaseModel):
     )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PersistentEmbeddingProviderMetadata(BaseModel):
+    provider_requested: str
+    provider_used: str
+    model_name: str
+    model_version: str
+    dimensions: int
+    fallback_reason: Optional[str] = None
+
+
+class PersistentEmbeddingMetadataResponse(BaseModel):
+    id: UUID
+    source_material_id: Optional[UUID] = None
+    national_material_id: Optional[UUID] = None
+    provider_requested: str
+    provider_used: str
+    model_name: str
+    model_version: str
+    dimensions: int
+    source_text_hash: str
+    metadata_json: Dict[str, Any] = Field(default_factory=dict)
+    status: str = Field(default="reused", description="generated, reused, updated, or fallback_generated")
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BatchEmbeddingGenerationResponse(BaseModel):
+    status: str = "success"
+    batch_id: UUID
+    total_materials: int
+    generated_count: int
+    reused_count: int
+    updated_count: int
+    fallback_count: int
+    provider: PersistentEmbeddingProviderMetadata
+    items: List[PersistentEmbeddingMetadataResponse] = Field(default_factory=list)
+
+
+class PersistentEmbeddingCompareRequest(BaseModel):
+    source_material_a_id: UUID
+    source_material_b_id: UUID
+
+
+class PersistentEmbeddingCompareResponse(BaseModel):
+    source_material_a_id: UUID
+    source_material_b_id: UUID
+    semantic_similarity_score: float = Field(..., ge=0.0, le=1.0)
+    provider: PersistentEmbeddingProviderMetadata
+    embedding_a: PersistentEmbeddingMetadataResponse
+    embedding_b: PersistentEmbeddingMetadataResponse
+    material_a_text_hash: str
+    material_b_text_hash: str
+    interpretation: str

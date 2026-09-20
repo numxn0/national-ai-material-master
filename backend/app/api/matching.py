@@ -1,8 +1,11 @@
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 from pathlib import Path
+from uuid import UUID
+from sqlalchemy.orm import Session
 
+from app.core.auth import require_roles
 from app.schemas import (
     MaterialMappingResponse,
     EXAMPLE_MATERIAL_MAPPING,
@@ -32,7 +35,14 @@ from app.schemas import (
     ExplainabilityResponse,
     ReviewDecisionRequest,
     ReviewDecisionResponse,
+    DurableMatchingRunRequest,
+    DurableMatchingRunResponse,
+    PersistedMatchCandidateResponse,
+    PersistedMatchResultsResponse,
+    PersistedMaterialSummary,
 )
+from app.db.session import get_db
+from app.services.auth import AuthenticatedUser
 from app.services.candidate_matching import find_duplicate_candidates
 from app.services.ingestion_preview import parse_csv_content
 from app.services.embedding_service import (
@@ -55,6 +65,12 @@ from app.services.explainability import (
     generate_factor_contributions,
     generate_reviewer_summary,
 )
+from app.services.persistent_matching import (
+    list_persistent_match_results,
+    run_persistent_matching,
+    summarize_source_material,
+)
+from app.services.persistent_embeddings import EmbeddingProviderUnavailable
 from datetime import datetime, timezone
 
 router = APIRouter(prefix="/matching", tags=["AI Matching & Deduplication"])
@@ -141,6 +157,90 @@ async def get_canonical_mapping_example():
     Shaped by MaterialMappingResponse Pydantic schema.
     """
     return EXAMPLE_MATERIAL_MAPPING
+
+
+@router.post("/run/{batch_id}", response_model=DurableMatchingRunResponse, tags=["Persistent Matching"])
+async def run_matching_for_batch(
+    batch_id: UUID,
+    payload: Optional[DurableMatchingRunRequest] = Body(default=None),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_roles("ADMIN", "CPSE_USER")),
+):
+    """
+    Run the existing rule-based matching pipeline against persisted source materials.
+    Existing demo/sample routes remain unchanged.
+    """
+    min_score = payload.min_score if payload else 0.65
+    try:
+        result = run_persistent_matching(db, batch_id, min_score=min_score)
+    except EmbeddingProviderUnavailable as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc))
+    if not result.get("found"):
+        raise HTTPException(status_code=404, detail=f"Ingestion batch '{batch_id}' not found.")
+
+    return DurableMatchingRunResponse(
+        batch_id=batch_id,
+        candidate_count=result["candidate_count"],
+        created_count=result["created_count"],
+        updated_count=result["updated_count"],
+        compared_record_count=result["compared_record_count"],
+        matching_config=result["matching_config"],
+    )
+
+
+@router.get("/results/{batch_id}", response_model=PersistedMatchResultsResponse, tags=["Persistent Matching"])
+async def get_matching_results_for_batch(
+    batch_id: UUID,
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+    classification: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    min_hybrid_score: Optional[float] = Query(None, ge=0.0, le=1.0),
+    db: Session = Depends(get_db),
+):
+    """
+    Return persisted candidate pairs involving at least one material from the batch.
+    """
+    total_or_none, rows, total = list_persistent_match_results(
+        db,
+        batch_id,
+        page=page,
+        limit=limit,
+        classification=classification,
+        status=status,
+        min_hybrid_score=min_hybrid_score,
+    )
+    if total_or_none is None:
+        raise HTTPException(status_code=404, detail=f"Ingestion batch '{batch_id}' not found.")
+
+    return PersistedMatchResultsResponse(
+        batch_id=batch_id,
+        count=len(rows),
+        total=total,
+        page=page,
+        limit=limit,
+        items=[
+            PersistedMatchCandidateResponse(
+                id=row.id,
+                pair_id=row.pair_id,
+                source_material_a_id=row.source_material_a_id,
+                source_material_b_id=row.source_material_b_id,
+                source_material_a=PersistedMaterialSummary(**summarize_source_material(row.source_material_a)) if row.source_material_a else None,
+                source_material_b=PersistedMaterialSummary(**summarize_source_material(row.source_material_b)) if row.source_material_b else None,
+                candidate_score=row.candidate_score,
+                hybrid_score=row.hybrid_score,
+                classification=row.classification,
+                status=row.status,
+                score_details=row.score_details or {},
+                explanation=row.explanation or {},
+                method_version=row.method_version,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+            for row in rows
+        ],
+    )
 
 @router.post("/candidates", response_model=CandidateMatchResponse, tags=["Candidate Duplicate Detection"])
 async def detect_duplicate_candidates(payload: CandidateMatchRequest):

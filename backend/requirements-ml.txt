@@ -1,0 +1,5 @@
+# Optional ML stack for local supervised experiments.
+# The app refuses to claim trained ML unless these dependencies and enough labels exist.
+xgboost>=2.0.0,<4.0.0
+lightgbm>=4.0.0,<5.0.0
+shap>=0.45.0,<1.0.0

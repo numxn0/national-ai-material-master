@@ -23,6 +23,11 @@ from .ingestion import (
     IngestionBatchBase,
     IngestionBatchCreate,
     IngestionBatchResponse,
+    IngestionRowErrorResponse,
+    PersistedSourceMaterialResponse,
+    CSVIngestResponse,
+    IngestionBatchDetailResponse,
+    PersistedMaterialsPageResponse,
     CSVPreviewRowError,
     CSVPreviewSummary,
     CSVPreviewResponse,
@@ -35,6 +40,9 @@ from .audit import (
     AuditTrailEvent,
     AuditTrailResponse,
     AuditChainVerificationResponse,
+    PersistentAuditEventResponse,
+    PersistentAuditEventsResponse,
+    PersistentAuditVerificationResponse,
 )
 from .extraction import (
     ExtractedAttribute,
@@ -50,6 +58,11 @@ from .matching import (
     CandidateMatchResult,
     CandidateMatchRequest,
     CandidateMatchResponse,
+    DurableMatchingRunRequest,
+    DurableMatchingRunResponse,
+    PersistedMaterialSummary,
+    PersistedMatchCandidateResponse,
+    PersistedMatchResultsResponse,
 )
 from .embedding import (
     EmbeddingVectorMetadata,
@@ -59,6 +72,11 @@ from .embedding import (
     SemanticSimilarityResponse,
     SemanticSampleComparisonItem,
     SemanticSampleComparisonResponse,
+    BatchEmbeddingGenerationResponse,
+    PersistentEmbeddingCompareRequest,
+    PersistentEmbeddingCompareResponse,
+    PersistentEmbeddingMetadataResponse,
+    PersistentEmbeddingProviderMetadata,
 )
 from .hybrid_scoring import (
     HybridClassification,
@@ -94,6 +112,40 @@ from .approval_workflow import (
 from .demo import (
     ModuleStatus,
     DemoSummaryResponse,
+)
+from .national_materials import (
+    DraftFromCandidateResponse,
+    NationalMaterialDetailResponse,
+    NationalMaterialDraftResponse,
+    SourceMappingResponse,
+)
+from .persistent_approvals import (
+    PersistentApprovalCaseCreateResponse,
+    PersistentApprovalCaseListResponse,
+    PersistentApprovalCaseResponse,
+    PersistentApprovalDecision,
+    PersistentApprovalDecisionRequest,
+    PersistentApprovalDecisionResponse,
+    PersistentApprovalResubmitRequest,
+)
+from .analytics import (
+    AnalyticsAuditChainSummary,
+    AnalyticsCategoryBreakdown,
+    AnalyticsCpseBreakdown,
+    AnalyticsIngestionTimelinePoint,
+    AnalyticsRecentActivity,
+    AnalyticsSummaryResponse,
+)
+from .integrations import (
+    IntegrationImportRunDetailResponse,
+    IntegrationImportRunResponse,
+    SapConnectionTestResponse,
+    SapImportMaterialsRequest,
+    SapImportMaterialsResponse,
+)
+from .auth import (
+    AuthenticatedUserResponse,
+    UserResponse,
 )
 from .examples import (
     EXAMPLE_SOURCE_MATERIAL,
@@ -134,6 +186,11 @@ __all__ = [
     "IngestionBatchBase",
     "IngestionBatchCreate",
     "IngestionBatchResponse",
+    "IngestionRowErrorResponse",
+    "PersistedSourceMaterialResponse",
+    "CSVIngestResponse",
+    "IngestionBatchDetailResponse",
+    "PersistedMaterialsPageResponse",
     "CSVPreviewRowError",
     "CSVPreviewSummary",
     "CSVPreviewResponse",
@@ -145,6 +202,9 @@ __all__ = [
     "AuditTrailEvent",
     "AuditTrailResponse",
     "AuditChainVerificationResponse",
+    "PersistentAuditEventResponse",
+    "PersistentAuditEventsResponse",
+    "PersistentAuditVerificationResponse",
     # Matching
     "CandidateClassification",
     "MatchingSignal",
@@ -153,6 +213,11 @@ __all__ = [
     "CandidateMatchResult",
     "CandidateMatchRequest",
     "CandidateMatchResponse",
+    "DurableMatchingRunRequest",
+    "DurableMatchingRunResponse",
+    "PersistedMaterialSummary",
+    "PersistedMatchCandidateResponse",
+    "PersistedMatchResultsResponse",
     # Embedding
     "EmbeddingVectorMetadata",
     "EmbeddingRequest",
@@ -161,6 +226,11 @@ __all__ = [
     "SemanticSimilarityResponse",
     "SemanticSampleComparisonItem",
     "SemanticSampleComparisonResponse",
+    "BatchEmbeddingGenerationResponse",
+    "PersistentEmbeddingCompareRequest",
+    "PersistentEmbeddingCompareResponse",
+    "PersistentEmbeddingMetadataResponse",
+    "PersistentEmbeddingProviderMetadata",
     # Hybrid Scoring & ML Features
     "HybridClassification",
     "MatchFeatureVector",
@@ -192,6 +262,35 @@ __all__ = [
     # Demo Summary
     "ModuleStatus",
     "DemoSummaryResponse",
+    # National Material Registry
+    "DraftFromCandidateResponse",
+    "NationalMaterialDetailResponse",
+    "NationalMaterialDraftResponse",
+    "SourceMappingResponse",
+    # Persistent Approval Workflow
+    "PersistentApprovalCaseCreateResponse",
+    "PersistentApprovalCaseListResponse",
+    "PersistentApprovalCaseResponse",
+    "PersistentApprovalDecision",
+    "PersistentApprovalDecisionRequest",
+    "PersistentApprovalDecisionResponse",
+    "PersistentApprovalResubmitRequest",
+    # Analytics
+    "AnalyticsAuditChainSummary",
+    "AnalyticsCategoryBreakdown",
+    "AnalyticsCpseBreakdown",
+    "AnalyticsIngestionTimelinePoint",
+    "AnalyticsRecentActivity",
+    "AnalyticsSummaryResponse",
+    # Integrations
+    "IntegrationImportRunDetailResponse",
+    "IntegrationImportRunResponse",
+    "SapConnectionTestResponse",
+    "SapImportMaterialsRequest",
+    "SapImportMaterialsResponse",
+    # Auth
+    "AuthenticatedUserResponse",
+    "UserResponse",
     # Examples
     "EXAMPLE_SOURCE_MATERIAL",
     "EXAMPLE_NATIONAL_MATERIAL",

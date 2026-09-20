@@ -19,7 +19,11 @@ import {
   fetchDemoApprovalQueue,
   submitDemoApprovalAction,
   fetchDemoAuditTrail,
-  verifyDemoAuditChain
+  verifyDemoAuditChain,
+  fetchPersistentApprovalCases,
+  submitPersistentApprovalDecision,
+  fetchPersistentAuditEvents,
+  verifyPersistentAuditChain
 } from '@/services/api';
 
 export const ApprovalsAuditPage: React.FC = () => {
@@ -34,6 +38,9 @@ export const ApprovalsAuditPage: React.FC = () => {
   const [auditVerification, setAuditVerification] = useState<AuditChainVerificationResponse | null>(null);
   const [loadingAudit, setLoadingAudit] = useState(false);
   const [showSignatures, setShowSignatures] = useState(false);
+  const [persistentCases, setPersistentCases] = useState<any | null>(null);
+  const [persistentAudit, setPersistentAudit] = useState<any | null>(null);
+  const [persistentVerify, setPersistentVerify] = useState<any | null>(null);
 
   useEffect(() => {
     loadAllData();
@@ -169,6 +176,78 @@ export const ApprovalsAuditPage: React.FC = () => {
           <span>{actionNotice}</span>
         </div>
       )}
+
+      <div className="bg-white border border-gray-200 rounded-lg p-5 shadow-sm space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">Production Approval & Audit</h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Authenticated persistent approval cases, role-aware L1/L2 decisions, durable audit events, and chain verification.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={async () => setPersistentCases(await fetchPersistentApprovalCases())}
+              className="px-3 py-1.5 rounded bg-blue-600 text-white text-xs font-semibold"
+            >
+              Load Cases
+            </button>
+            <button
+              onClick={async () => {
+                setPersistentAudit(await fetchPersistentAuditEvents());
+                setPersistentVerify(await verifyPersistentAuditChain());
+              }}
+              className="px-3 py-1.5 rounded border border-gray-300 bg-white text-gray-700 text-xs font-medium"
+            >
+              Verify Audit
+            </button>
+          </div>
+        </div>
+        {persistentCases && (
+          <div className="space-y-2">
+            {(persistentCases.items || []).map((item: any) => (
+              <div key={item.id} className="border border-gray-200 rounded p-3 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+                <div>
+                  <p className="font-mono font-bold text-blue-700">{item.proposed_national_material_code}</p>
+                  <p className="text-gray-600">{item.current_stage} • {item.approval_status}</p>
+                </div>
+                {['PENDING_L1', 'PENDING_L2'].includes(item.current_stage) && (
+                  <div className="flex gap-2">
+                    <button
+                      onClick={async () => {
+                        const updated = await submitPersistentApprovalDecision(item.id, 'APPROVE');
+                        setActionNotice(`Persistent case ${updated.case.approval_case_id} approved.`);
+                        setPersistentCases(await fetchPersistentApprovalCases());
+                      }}
+                      className="px-2.5 py-1 rounded bg-green-600 text-white font-semibold"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      onClick={async () => {
+                        const updated = await submitPersistentApprovalDecision(item.id, 'REJECT');
+                        setActionNotice(`Persistent case ${updated.case.approval_case_id} rejected.`);
+                        setPersistentCases(await fetchPersistentApprovalCases());
+                      }}
+                      className="px-2.5 py-1 rounded border border-gray-300 text-gray-700"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {persistentVerify && (
+          <div className="text-xs rounded border border-green-200 bg-green-50 p-3 text-green-800">
+            Persistent audit status: <strong>{persistentVerify.status}</strong> • {persistentVerify.total_events} events
+          </div>
+        )}
+        {persistentAudit && (
+          <p className="text-xs text-gray-500">Loaded {persistentAudit.total} persistent audit events.</p>
+        )}
+      </div>
 
       {/* SECTION 1: Pending Approvals */}
       <div className="space-y-4">
